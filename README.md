@@ -2,9 +2,11 @@
 
 InboxRecyclerView is a library for building expandable descendant navigation, inspired by [Google Inbox](http://androidniceties.tumblr.com/post/100872004063/inbox-by-gmail-google-play-link) and [Reply](https://material.io/design/material-studies/reply.html). If you're interested in learning how it was created, [here's a detailed blog post](https://saket.me/inbox-recyclerview).
 
+```groovy
+implementation 'me.saket:inboxrecyclerview:1.0.0-rc1'
 ```
-implementation 'me.saket:inboxrecyclerview:1.0.0-beta1'
-```
+
+FYI, `InboxRecyclerView` has a dependency on `androidx`. If you haven't [migrated](https://android-developers.googleblog.com/2018/05/hello-world-androidx.html) from the support library already, this would be a good opportunity.
 
 ### Usage
 
@@ -13,11 +15,20 @@ implementation 'me.saket:inboxrecyclerview:1.0.0-beta1'
 **Layout**
 
 ```xml
-<me.saket.expand.InboxRecyclerView
+<me.saket.inboxrecyclerview.InboxRecyclerView
   android:layout_width="match_parent"
   android:layout_height="match_parent" />
 
-<me.saket.expand.page.ExpandablePageLayout
+<!--
+  This is where your expandable content will be present. One
+  way of using it would be to add a Fragment inside the layout
+  and update it when any list item is clicked.
+
+  It's recommended that the content page has a higher z-index
+  than the list. This can be achieved by either giving it a
+  higher view position or a higher elevation.
+-->
+<me.saket.inboxrecyclerview.page.ExpandablePageLayout
   android:layout_width="match_parent"
   android:layout_height="match_parent" />
 ```
@@ -27,12 +38,11 @@ implementation 'me.saket:inboxrecyclerview:1.0.0-beta1'
 ```java
 recyclerView.setExpandablePage(contentPage)
 
-recyclerViewAdapter.setOnItemClickListener { clickedItem ->
-  expandablePageFragment.loadContent(clickedItem)
-  recyclerView.expandItem(clickedItem.adapterId)`
+recyclerViewAdapter.itemClickListener = { clickedItem ->
+  expandableFragment.loadContent(clickedItem)
+  recyclerView.expandItem(clickedItem.adapterId)
 }
 ```
-
 
 ### How do I…
 

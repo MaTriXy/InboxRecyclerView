@@ -7,8 +7,8 @@ import android.graphics.Rect
 import android.graphics.drawable.Drawable
 import android.os.Parcelable
 import android.util.AttributeSet
+import android.view.MotionEvent
 import android.view.View
-import android.view.ViewGroup
 import android.view.Window
 import androidx.annotation.Px
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -40,9 +40,12 @@ class InboxRecyclerView(
   /** Controls how items are dimmed when the page is expanding/collapsing. */
   var tintPainter: TintPainter = TintPainter.noOp()
     set(value) {
+      val old = field
       field = value
+
       if (pageSetupDone) {
-        tintPainter.onAttachRecyclerView(this)
+        old.onDetachRecyclerView(this)
+        field.onAttachRecyclerView(this)
       }
     }
 
@@ -74,6 +77,14 @@ class InboxRecyclerView(
   override fun onRestoreInstanceState(state: Parcelable) {
     val superState = restorer.restore(state)
     super.onRestoreInstanceState(superState)
+  }
+
+  override fun onDetachedFromWindow() {
+    if (pageSetupDone) {
+      itemExpandAnimator.onDetachRecyclerView(this)
+      tintPainter.onDetachRecyclerView(this)
+    }
+    super.onDetachedFromWindow()
   }
 
   /**
@@ -125,22 +136,28 @@ class InboxRecyclerView(
     }
   }
 
+  override fun dispatchTouchEvent(ev: MotionEvent?): Boolean {
+    val dispatched = super.dispatchTouchEvent(ev)
+
+    return if (pageSetupDone && page.isExpanded) {
+      // Intentionally leak touch events behind just in case the content page has
+      // a lower z-index than than this list. This is an ugly hack, but I cannot
+      // think of a way to enforce view positions. Fortunately this hack will not
+      // have any effect when the page is positioned at a higher z-index, where
+      // it'll consume all touch events before they even reach this list.
+      false
+
+    } else {
+      dispatched
+    }
+  }
+
   private fun ensureSetup() {
     if (pageSetupDone.not()) {
       throw IllegalStateException("Did you forget to call InboxRecyclerView.setup()?")
     }
     if (adapter == null) {
       throw IllegalStateException("Adapter isn't attached yet.")
-    }
-
-    // The page must always have a higher z-index so that InboxRecyclerView does not
-    // block its touch events. Plus, having an elevation that gets drawn on top of
-    // this RV will look nice.
-    val parentLayout = parent as ViewGroup
-    val thisIndex = parentLayout.indexOfChild(this)
-    val pageIndex = parentLayout.indexOfChild(page)
-    if (thisIndex > pageIndex || z > page.z) {
-      throw IllegalStateException("ExpandablePageLayout must have a higher z-index than InboxRecyclerView")
     }
   }
 
@@ -165,6 +182,7 @@ class InboxRecyclerView(
     for (i in 0 until adapter.itemCount) {
       if (adapter.getItemId(i) == itemId) {
         itemAdapterPosition = i
+        break
       }
     }
 
@@ -340,8 +358,7 @@ class InboxRecyclerView(
       internal val EMPTY = ExpandedItem(itemId = -1, viewIndex = -1, expandedItemLocationRect = Rect(0, 0, 0, 0))
     }
   }
-
-  companion object {
-    const val animationStartDelay: Int = 0  // Only used for debugging.
-  }
 }
+
+// Only used for debugging.
+internal const val ANIMATION_START_DELAY = 0L
