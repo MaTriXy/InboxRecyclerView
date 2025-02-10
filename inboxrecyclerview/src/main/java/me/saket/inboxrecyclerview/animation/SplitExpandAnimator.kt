@@ -1,70 +1,70 @@
 package me.saket.inboxrecyclerview.animation
 
 import android.view.View
+import me.saket.inboxrecyclerview.InboxRecyclerView
+import me.saket.inboxrecyclerview.page.ExpandablePageLayout
 
 /**
- * When the page is expanding, this pushes all RecyclerView items out of the Window.
- * The expanding item is pushed to align with the top edge, while the items above it
- * are pushed out of the window towards the top and the rest towards the bottom.
- *
- * Vice versa when the page is collapsing.
+ * [https://www.youtube.com/watch?v=WQGtweo-2dc]
  */
-open class SplitExpandAnimator : ItemExpandAnimator() {
+internal class SplitExpandAnimator : ItemExpandAnimator() {
 
-  override fun onPageMove() {
-    val page = recyclerView.page
-    if (page.isCollapsed) {
+  override fun onPageMove(
+    recyclerView: InboxRecyclerView,
+    page: ExpandablePageLayout,
+    anchorViewOverlay: View?
+  ) {
+    if (!page.isMoving) {
       // Reset everything. This is also useful when the content size
       // changes, say as a result of the soft-keyboard getting dismissed.
-      recyclerView.apply {
-        for (childIndex in 0 until childCount) {
-          val childView = getChildAt(childIndex)
-          childView.translationY = 0F
-          childView.alpha = 1F
-        }
-      }
+      resetAnimation(recyclerView, anchorViewOverlay)
       return
     }
 
-    val (anchorIndex) = recyclerView.expandedItem
-    val anchorView: View? = recyclerView.getChildAt(anchorIndex)
+    val anchorIndex = recyclerView.expandedItemLoc.viewIndex
+    val anchorViewLocation = recyclerView.expandedItemLoc.locationOnScreen
 
-    val pageTop = page.translationY
-    val pageBottom = page.translationY + page.clippedDimens.height()
+    val pageTop = page.locationOnScreen().top
+    val pageBottom = pageTop + page.clippedDimens.height()
 
     // Move the RecyclerView rows with the page.
-    if (anchorView != null) {
-      val distanceExpandedTowardsTop = pageTop - anchorView.top
-      val distanceExpandedTowardsBottom = pageBottom - anchorView.bottom
-      moveListItems(anchorIndex, distanceExpandedTowardsTop, distanceExpandedTowardsBottom)
+    if (anchorViewOverlay != null) {
+      val distanceExpandedTowardsTop = pageTop - anchorViewLocation.top
+      val distanceExpandedTowardsBottom = pageBottom - anchorViewLocation.bottom
+      recyclerView.moveListItems(anchorIndex, distanceExpandedTowardsTop, distanceExpandedTowardsBottom)
 
     } else {
       // Anchor View can be null when the page was expanded from
       // an arbitrary location. See InboxRecyclerView#expandFromTop().
-      moveListItems(anchorIndex, 0F, pageBottom)
+      recyclerView.moveListItems(anchorIndex, 0, pageBottom - pageTop)
     }
 
     // Fade in the anchor row with the expanding/collapsing page.
-    anchorView?.apply {
-      val minPageHeight = anchorView.height
-      val maxPageHeight = page.height
-      val expandRatio = (page.clippedDimens.height() - minPageHeight).toFloat() / (maxPageHeight - minPageHeight)
-      applyAlphaOnAnchorView(this, expandRatio)
-    }
+    anchorViewOverlay?.alpha = 1f - page.expandRatio(recyclerView)
   }
 
-  open fun applyAlphaOnAnchorView(anchorView: View, expandRatio: Float) {
-    anchorView.alpha = 1F - expandRatio
-  }
-
-  open fun moveListItems(anchorIndex: Int, distanceExpandedTowardsTop: Float, distanceExpandedTowardsBottom: Float) {
-    recyclerView.apply {
-      for (childIndex in 0 until childCount) {
-        getChildAt(childIndex).translationY = when {
-          childIndex <= anchorIndex -> distanceExpandedTowardsTop
-          else -> distanceExpandedTowardsBottom
-        }
+  private fun InboxRecyclerView.moveListItems(
+    anchorIndex: Int,
+    distanceExpandedTowardsTop: Int,
+    distanceExpandedTowardsBottom: Int
+  ) {
+    for (childIndex in 0 until childCount) {
+      getChildAt(childIndex).translationY = when {
+        childIndex <= anchorIndex -> distanceExpandedTowardsTop.toFloat()
+        else -> distanceExpandedTowardsBottom.toFloat()
       }
     }
+  }
+
+  override fun resetAnimation(
+    recyclerView: InboxRecyclerView,
+    anchorViewOverlay: View?
+  ) {
+    for (childIndex in 0 until recyclerView.childCount) {
+      val childView = recyclerView.getChildAt(childIndex)
+      childView.translationY = 0F
+      childView.alpha = 1F
+    }
+    anchorViewOverlay?.alpha = 0f
   }
 }

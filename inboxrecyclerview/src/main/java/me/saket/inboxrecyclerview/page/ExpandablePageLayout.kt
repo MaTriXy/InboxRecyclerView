@@ -5,58 +5,112 @@ import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Canvas
+import android.graphics.Outline
+import android.graphics.Rect
+import android.graphics.drawable.Drawable
+import android.os.Parcelable
 import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
-import androidx.appcompat.widget.Toolbar
+import android.view.ViewOutlineProvider
+import androidx.annotation.FloatRange
+import kotlinx.android.parcel.Parcelize
 import me.saket.inboxrecyclerview.ANIMATION_START_DELAY
 import me.saket.inboxrecyclerview.InboxRecyclerView
+import me.saket.inboxrecyclerview.InboxRecyclerView.ExpandedItemLocation
 import me.saket.inboxrecyclerview.InternalPageCallbacks
-import me.saket.inboxrecyclerview.executeOnMeasure
+import me.saket.inboxrecyclerview.InternalPageCallbacks.NoOp
+import me.saket.inboxrecyclerview.dimming.AnimatedVisibilityColorDrawable
+import me.saket.inboxrecyclerview.doOnLayout2
+import me.saket.inboxrecyclerview.locationOnScreen
+import me.saket.inboxrecyclerview.page.ExpandablePageLayout.PageState.EXPANDED
+import me.saket.inboxrecyclerview.page.ExpandablePageLayout.PageState.EXPANDING
 import me.saket.inboxrecyclerview.withEndAction
 import java.lang.reflect.Method
+import java.util.concurrent.CopyOnWriteArrayList
+import kotlin.DeprecationLevel.ERROR
+import kotlin.math.abs
+import kotlin.math.max
 
 /**
  * An expandable / collapsible layout for use with a [InboxRecyclerView].
  */
+@Suppress("LeakingThis")
 open class ExpandablePageLayout @JvmOverloads constructor(
-    context: Context,
-    attrs: AttributeSet? = null
-) : BaseExpandablePageLayout(context, attrs), PullToCollapseListener.OnPullListener {
+  context: Context,
+  attrs: AttributeSet? = null
+) : BaseExpandablePageLayout(context, attrs), PullToCollapseListener.OnPullListener, SimpleNestedScrollingParent3 {
 
-  var parentToolbar: View? = null
+  /** See [pushParentToolbarOnExpand]. */
+  private var parentToolbar: View? = null
 
-  /** Alpha of this page when it's collapsed. */
-  internal var collapsedAlpha = 0F
+  /**
+   * When this page is expanding, the content is smoothly faded in.
+   * This value controls the max opacity of the content.
+   */
+  @FloatRange(from = 0.0, to = 1.0)
+  var contentOpacityWhenCollapsed = 0f
 
-  var pullToCollapseInterceptor: OnPullToCollapseInterceptor = IGNORE_ALL_PULL_TO_COLLAPSE_INTERCEPTOR
+  /**
+   * When this page is collapsing, the content is smoothly faded out.
+   * This value controls the min opacity of the content.
+   */
+  @FloatRange(from = 0.0, to = 1.0)
+  val contentOpacityWhenExpanded = 1f
 
-  /** Minimum Y-distance the page has to be pulled before it's eligible for collapse. */
-  var pullToCollapseThresholdDistance: Int
-    get() = pullToCollapseListener.collapseDistanceThreshold
+  /**
+   * Opacity of content while the page is expanding/collapsing.
+   */
+  internal var contentOpacity: Float = contentOpacityWhenCollapsed
     set(value) {
-      pullToCollapseListener.collapseDistanceThreshold = value
+      field = value
+      invalidate()
+      invalidateOutline()
     }
 
-  var pullToCollapseEnabled = false
-  val pullToCollapseListener: PullToCollapseListener
+  /**
+   * See [OnPullToCollapseInterceptor].
+   */
+  var pullToCollapseInterceptor: OnPullToCollapseInterceptor? = null
+
+  /**
+   * Minimum Y-distance the page has to be pulled before it's eligible for collapse.
+   * Defaults to around 56dp which is a Toolbar's height.
+   */
+  var pullToCollapseThresholdDistance: Int
+    get() = nestedScroller.collapseDistanceThreshold
+    set(value) {
+      nestedScroller.collapseDistanceThreshold = value
+    }
+
+  /**
+   * Whether pulling/dragging this page vertically beyond [pullToCollapseThresholdDistance]
+   * will trigger a collapse.
+   * */
+  var pullToCollapseEnabled = true
+
+  @Deprecated(message = "InboxRecyclerView now uses nested scrolling.", level = ERROR)
+  val pullToCollapseListener = Unit
+
   lateinit var currentState: PageState
 
-  internal var internalStateCallbacksForRecyclerView: InternalPageCallbacks = InternalPageCallbacks.NoOp()
-  private var internalStateCallbacksForNestedPage: InternalPageCallbacks = InternalPageCallbacks.NoOp()
-  private var stateChangeCallbacks: MutableList<PageStateChangeCallbacks> = ArrayList(4)
+  internal var internalStateCallbacksForRecyclerView: InternalPageCallbacks = NoOp()
+  private var internalStateCallbacksForNestedPage: InternalPageCallbacks = NoOp()
+  private var stateChangeCallbacks = CopyOnWriteArrayList<PageStateChangeCallbacks>()
+
+  private val nestedScroller = PullToCollapseNestedScroller(this)
+  private val touchListener = PullToCollapseTouchListener(this, nestedScroller)
 
   private var nestedPage: ExpandablePageLayout? = null
   private var toolbarAnimator: ValueAnimator = ObjectAnimator()
-  private val expandedAlpha = 1F
+  private var contentCoverAnimator: ValueAnimator = ObjectAnimator()
   private var isFullyCoveredByNestedPage = false
+  private var ignoreDrawableInvalidates: Boolean = false
+  internal var dimDrawable: AnimatedVisibilityColorDrawable? = null
 
   val isExpanded: Boolean
     get() = currentState == PageState.EXPANDED
-
-  val isExpandingOrCollapsing: Boolean
-    get() = currentState == PageState.EXPANDING || currentState == PageState.COLLAPSING
 
   val isCollapsing: Boolean
     get() = currentState == PageState.COLLAPSING
@@ -67,11 +121,25 @@ open class ExpandablePageLayout @JvmOverloads constructor(
   val isExpanding: Boolean
     get() = currentState == PageState.EXPANDING
 
+  val isExpandingOrCollapsing: Boolean
+    get() = currentState == PageState.EXPANDING || currentState == PageState.COLLAPSING
+
+  val isExpandedOrCollapsed: Boolean
+    get() = currentState == PageState.EXPANDED || currentState == PageState.COLLAPSED
+
   val isExpandedOrExpanding: Boolean
     get() = currentState == PageState.EXPANDED || currentState == PageState.EXPANDING
 
   val isCollapsedOrCollapsing: Boolean
     get() = currentState == PageState.COLLAPSING || currentState == PageState.COLLAPSED
+
+  /** Whether the page will collapse if the touched is released right now. */
+  val isCollapseEligible
+    get() = abs(translationY) >= pullToCollapseThresholdDistance
+
+  /** Whether the page is expanding/collapsing or if it's being pulled to collapse. */
+  val isMoving: Boolean
+    get() = isExpandingOrCollapsing || isExpanded && translationY != 0f
 
   enum class PageState {
     COLLAPSING,
@@ -82,13 +150,19 @@ open class ExpandablePageLayout @JvmOverloads constructor(
 
   init {
     // Hidden on start.
-    alpha = expandedAlpha
-    visibility = View.INVISIBLE
+    visibility = INVISIBLE
+    contentOpacity = contentOpacityWhenCollapsed
     changeState(PageState.COLLAPSED)
 
     pullToCollapseEnabled = true
-    pullToCollapseListener = PullToCollapseListener(getContext(), this)
-    pullToCollapseListener.addOnPullListener(this)
+    nestedScroller.addOnPullListener(this)
+
+    outlineProvider = object : ViewOutlineProvider() {
+      override fun getOutline(view: View, outline: Outline) {
+        BACKGROUND.getOutline(view, outline)
+        outline.alpha = contentOpacity
+      }
+    }
   }
 
   override fun onAttachedToWindow() {
@@ -103,66 +177,60 @@ open class ExpandablePageLayout @JvmOverloads constructor(
   }
 
   override fun onDetachedFromWindow() {
-    pullToCollapseInterceptor = IGNORE_ALL_PULL_TO_COLLAPSE_INTERCEPTOR
-    parentToolbar = null
+    stopAnyOngoingAnimation()
+    pushParentToolbarOnExpand(toolbar = null)
     nestedPage = null
-    internalStateCallbacksForNestedPage = InternalPageCallbacks.NoOp()
-    internalStateCallbacksForRecyclerView = InternalPageCallbacks.NoOp()
+    pullToCollapseInterceptor = null
+    nestedScroller.removeAllOnPullListeners()
+    internalStateCallbacksForNestedPage = NoOp()
+    internalStateCallbacksForRecyclerView = NoOp()
     stateChangeCallbacks.clear()
     super.onDetachedFromWindow()
+  }
+
+  override fun onSaveInstanceState(): Parcelable {
+    return ExpandablePageSavedState(
+        superState = super.onSaveInstanceState(),
+        state = currentState
+    )
+  }
+
+  override fun onRestoreInstanceState(state: Parcelable) {
+    require(state is ExpandablePageSavedState)
+    super.onRestoreInstanceState(state.superState)
+
+    if (state.state == EXPANDED || state.state == EXPANDING) {
+      expandImmediately()
+    }
   }
 
   private fun changeState(newPageState: PageState) {
     currentState = newPageState
   }
 
-  override fun hasOverlappingRendering(): Boolean {
-    // This should help improve performance when animating alpha.
-    // Source: https://www.youtube.com/watch?v=wIy8g8yNhNk.
-    return false
-  }
+  override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+    super.onSizeChanged(w, h, oldw, oldh)
 
-  override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
-    // Ignore touch events until the page is
-    // fully expanded for avoiding accidental taps.
-    if (isExpanded) {
-      super.dispatchTouchEvent(ev)
+    if (currentState == EXPANDED) {
+      resetClipping()
     }
-
-    // Consume all touch events to avoid them leaking behind.
-    return true
   }
 
-  override fun onInterceptTouchEvent(event: MotionEvent): Boolean {
-    var intercepted = false
-    if (pullToCollapseEnabled && visibility == View.VISIBLE) {
-      intercepted = pullToCollapseListener.onTouch(this, event)
-    }
-
-    return intercepted || super.onInterceptTouchEvent(event)
-  }
-
-  @SuppressLint("ClickableViewAccessibility")
-  override fun onTouchEvent(event: MotionEvent): Boolean {
-    val handled = pullToCollapseEnabled && pullToCollapseListener.onTouch(this, event)
-    return handled || super.onTouchEvent(event)
+  override fun onPullStarted() {
+    dispatchOnPagePullStartedCallbacks()
   }
 
   override fun onPull(
-      deltaY: Float,
-      currentTranslationY: Float,
-      upwardPull: Boolean,
-      deltaUpwardPull: Boolean,
-      collapseEligible: Boolean
+    deltaY: Float,
+    currentTranslationY: Float,
+    upwardPull: Boolean,
+    deltaUpwardPull: Boolean,
+    collapseEligible: Boolean
   ) {
-    // In case the user pulled the page before it could fully
-    // open (and while the toolbar was still hiding).
-    stopToolbarAnimation()
-
     // Reveal the toolbar if this page is being pulled down or
     // hide it back if it's being released.
     if (parentToolbar != null) {
-      updateToolbarTranslationY(currentTranslationY > 0F, currentTranslationY)
+      updateToolbarTranslationY(show = currentTranslationY > 0F, currentTranslationY)
     }
 
     // Sync the positions of the list items with this page.
@@ -172,7 +240,7 @@ open class ExpandablePageLayout @JvmOverloads constructor(
   override fun onRelease(collapseEligible: Boolean) {
     dispatchOnPageReleaseCallback(collapseEligible)
 
-    if (!collapseEligible.not()) {
+    if (collapseEligible) {
       return
     }
 
@@ -182,9 +250,6 @@ open class ExpandablePageLayout @JvmOverloads constructor(
       return
     }
 
-    changeState(PageState.EXPANDED)
-    stopAnyOngoingPageAnimation()
-
     // Restore everything to their expanded position.
     // 1. Hide Toolbar again.
     if (parentToolbar != null) {
@@ -193,10 +258,10 @@ open class ExpandablePageLayout @JvmOverloads constructor(
 
     // 2. Expand page again.
     if (translationY != 0F) {
+      animateContentCoverAlpha(expand = true)
+      animateDimensions(width, height)
       animate()
-          .withLayer()
           .translationY(0F)
-          .alpha(expandedAlpha)
           .setDuration(animationDurationMillis)
           .setInterpolator(animationInterpolator)
           .withEndAction { dispatchOnPageFullyCoveredCallback() }
@@ -207,12 +272,10 @@ open class ExpandablePageLayout @JvmOverloads constructor(
   /**
    * Expands this page (with animation) so that it fills the whole screen.
    */
-  internal fun expand(expandedItem: InboxRecyclerView.ExpandedItem) {
-    if (isLaidOut.not() && visibility != View.GONE) {
+  internal open fun expand(expandedItem: ExpandedItemLocation) {
+    if ((width == 0 || height == 0) && visibility != View.GONE) {
       throw IllegalAccessError("Width / Height not available to expand")
     }
-
-    // Ignore if already expanded.
     if (isExpandedOrExpanding) {
       return
     }
@@ -228,20 +291,21 @@ open class ExpandablePageLayout @JvmOverloads constructor(
   }
 
   /**
-   * Expand this page instantly, without any animation.
+   * Expand this page instantly, without any animation. Useful when using this layout
+   * as a standalone page, without an associated InboxRecyclerView to manage its lifecycle.
    */
-  internal fun expandImmediately() {
-    if (currentState == PageState.EXPANDING || currentState == PageState.EXPANDED) {
+  internal open fun expandImmediately() {
+    if (isExpandedOrExpanding) {
       return
     }
 
     visibility = View.VISIBLE
-    alpha = expandedAlpha
+    contentOpacity = contentOpacityWhenExpanded
 
     // Hide the toolbar as soon as its height is available.
-    parentToolbar?.executeOnMeasure { updateToolbarTranslationY(false, 0F) }
+    parentToolbar?.doOnLayout2 { updateToolbarTranslationY(show = false, 0f) }
 
-    executeOnMeasure {
+    doOnLayout2 {
       // Cover the whole screen right away. Don't need any animations.
       alignPageToCoverScreen()
       dispatchOnPageAboutToExpandCallback(0)
@@ -252,49 +316,80 @@ open class ExpandablePageLayout @JvmOverloads constructor(
   /**
    * Collapses this page, back to its original state.
    */
-  internal fun collapse(expandedItem: InboxRecyclerView.ExpandedItem) {
+  internal fun collapse(expandedItem: ExpandedItemLocation) {
     if (currentState == PageState.COLLAPSED || currentState == PageState.COLLAPSING) {
       return
     }
 
-    var targetWidth = expandedItem.expandedItemLocationRect.width()
-    val targetHeight = expandedItem.expandedItemLocationRect.height()
+    // Send state callbacks that the city is going to collapse.
+    dispatchOnPageAboutToCollapseCallback()
+
+    var targetWidth = expandedItem.locationOnScreen.width()
+    val targetHeight = expandedItem.locationOnScreen.height()
     if (targetWidth == 0) {
       // Page must have expanded immediately after a state restoration.
       targetWidth = width
     }
     animatePageExpandCollapse(false, targetWidth, targetHeight, expandedItem)
-
-    // Send state callbacks that the city is going to collapse.
-    dispatchOnPageAboutToCollapseCallback()
   }
 
   /**
    * Place the expandable page exactly on top of the expanding item.
    */
-  private fun alignPageWithExpandingItem(expandedItem: InboxRecyclerView.ExpandedItem) {
+  private fun alignPageWithExpandingItem(expandedItem: ExpandedItemLocation) {
     // Match height and location.
     setClippedDimensions(
-        expandedItem.expandedItemLocationRect.width(),
-        expandedItem.expandedItemLocationRect.height()
+        expandedItem.locationOnScreen.width(),
+        expandedItem.locationOnScreen.height()
     )
-    translationY = expandedItem.expandedItemLocationRect.top.toFloat()
+    translationY = distanceYTo(expandedItem)
+    translationX = distanceXTo(expandedItem)
   }
 
-  internal fun alignPageToCoverScreen() {
+  /**
+   * Calculates the distance between a [InboxRecyclerView.ExpandedItemLocation] and this page
+   * by using their raw coordinates on the screen. Useful when [InboxRecyclerView] and
+   * [ExpandablePageLayout] do not share the same parent or same bounds. For e.g., the
+   * [InboxRecyclerView] may be below a toolbar whereas the [ExpandablePageLayout]
+   * in front of the toolbar.
+   */
+  private fun distanceYTo(expandedItem: ExpandedItemLocation): Float {
+    val pageYOnScreen = locationOnScreen().top
+    val itemYOnScreen = expandedItem.locationOnScreen.top.toFloat()
+    return itemYOnScreen - (pageYOnScreen - translationY)
+  }
+
+  private fun distanceXTo(expandedItem: ExpandedItemLocation): Float {
+    val pageXOnScreen = locationOnScreen().left
+    val itemXOnScreen = expandedItem.locationOnScreen.left.toFloat()
+    return itemXOnScreen - (pageXOnScreen - translationX)
+  }
+
+  private val intArrayBuffer = IntArray(2)
+  private val rectBuffer = Rect()
+  fun locationOnScreen(): Rect {
+    return locationOnScreen(intArrayBuffer, rectBuffer)
+  }
+
+  private fun alignPageToCoverScreen() {
     resetClipping()
     translationY = 0F
   }
 
-  internal fun animatePageExpandCollapse(expand: Boolean, targetWidth: Int, targetHeight: Int, expandedItem: InboxRecyclerView.ExpandedItem) {
-    var targetPageTranslationY = if (expand) 0F else expandedItem.expandedItemLocationRect.top.toFloat()
-    val targetPageTranslationX = if (expand) 0F else expandedItem.expandedItemLocationRect.left.toFloat()
+  private fun animatePageExpandCollapse(
+    expand: Boolean,
+    targetWidth: Int,
+    targetHeight: Int,
+    expandedItem: ExpandedItemLocation
+  ) {
+    val targetPageTranslationX = if (expand) 0F else distanceXTo(expandedItem)
+    var targetPageTranslationY = if (expand) 0F else distanceYTo(expandedItem)
 
     // If there's no record about the expanded list item (from whose place this page was expanded),
     // collapse just below the toolbar and not the window top to avoid closing the toolbar upon hiding.
-    if (!expand && expandedItem.expandedItemLocationRect.height() == 0) {
+    if (!expand && expandedItem.locationOnScreen.height() == 0) {
       val toolbarBottom = if (parentToolbar != null) parentToolbar!!.bottom else 0
-      targetPageTranslationY = Math.max(targetPageTranslationY, toolbarBottom.toFloat())
+      targetPageTranslationY = targetPageTranslationY.coerceAtLeast(toolbarBottom.toFloat())
     }
 
     if (expand.not()) {
@@ -305,11 +400,9 @@ open class ExpandablePageLayout @JvmOverloads constructor(
       visibility = View.VISIBLE
     }
 
-    alpha = if (expand) collapsedAlpha else expandedAlpha
-    stopAnyOngoingPageAnimation()
+    stopAnyOngoingAnimation()
+    animateContentCoverAlpha(expand)
     animate()
-        .withLayer()
-        .alpha(if (expand) expandedAlpha else collapsedAlpha)
         .translationY(targetPageTranslationY)
         .translationX(targetPageTranslationX)
         .setDuration(animationDurationMillis)
@@ -346,36 +439,69 @@ open class ExpandablePageLayout @JvmOverloads constructor(
     animateDimensions(targetWidth, targetHeight)
   }
 
-  private fun animateToolbar(show: Boolean, targetPageTranslationY: Float) {
+  protected open fun animateContentCoverAlpha(expand: Boolean) {
+    if (contentOpacityWhenCollapsed != contentOpacityWhenExpanded) {
+      checkNotNull(background) {
+        "A solid background is needed on this page for smoothly fading in/out its content."
+      }
+    }
+
+    val toAlpha: Float = if (expand) contentOpacityWhenExpanded else contentOpacityWhenCollapsed
+
+    contentCoverAnimator.cancel()
+    contentCoverAnimator = ObjectAnimator.ofFloat(contentOpacity, toAlpha).apply {
+      duration = animationDurationMillis / 3
+      startDelay = ANIMATION_START_DELAY + if (expand) 0 else animationDurationMillis / 3
+      addUpdateListener {
+        contentOpacity = it.animatedValue as Float
+      }
+      start()
+    }
+  }
+
+  private fun animateToolbar(
+    show: Boolean,
+    targetPageTranslationY: Float
+  ) {
     if (translationY == targetPageTranslationY) {
       return
     }
 
-    val toolbarCurrentBottom = if (parentToolbar != null) parentToolbar!!.bottom + parentToolbar!!.translationY else 0F
-    val fromTy = Math.max(toolbarCurrentBottom, translationY)
+    val toolbarCurrentBottom = when {
+      parentToolbar != null -> parentToolbar!!.bottom + parentToolbar!!.translationY
+      else -> 0F
+    }
+    val fromTy = max(toolbarCurrentBottom, translationY)
 
     // The hide animation happens a bit too quickly if the page has to travel a large
     // distance (when using the current interpolator: EASE). Let's try slowing it down.
-    var speedFactor = 1L
-    if (show && Math.abs(targetPageTranslationY - fromTy) > clippedDimens.height() * 2 / 5) {
-      speedFactor *= 2L
+    @Suppress("DEPRECATION")
+    val speedFactor = when {
+      show && abs(targetPageTranslationY - fromTy) > clippedDimens.height() * 2 / 5 -> 2L
+      else -> 1L
     }
 
-    stopToolbarAnimation()
+    toolbarAnimator.cancel()
 
     // If the page lies behind the toolbar, use toolbar's current bottom position instead
-    toolbarAnimator = ObjectAnimator.ofFloat(fromTy, targetPageTranslationY)
-    toolbarAnimator.addUpdateListener { animation -> updateToolbarTranslationY(show, animation.animatedValue as Float) }
-    toolbarAnimator.duration = animationDurationMillis * speedFactor
-    toolbarAnimator.interpolator = animationInterpolator
-    toolbarAnimator.startDelay = ANIMATION_START_DELAY
-    toolbarAnimator.start()
+    toolbarAnimator = ObjectAnimator.ofFloat(fromTy, targetPageTranslationY).apply {
+      addUpdateListener { animation ->
+        updateToolbarTranslationY(show, animation.animatedValue as Float)
+      }
+      duration = animationDurationMillis * speedFactor
+      interpolator = animationInterpolator
+      startDelay = ANIMATION_START_DELAY
+      start()
+    }
   }
 
   /**
-   * Helper method for showing / hiding the toolbar depending upon this page's current translationY.
+   * Show / hide the toolbar depending upon this page's current translationY.
    */
-  private fun updateToolbarTranslationY(show: Boolean, pageTranslationY: Float) {
+  private fun updateToolbarTranslationY(
+    show: Boolean,
+    pageTranslationY: Float
+  ) {
     val toolbarHeight = parentToolbar!!.bottom
     var targetTranslationY = pageTranslationY - toolbarHeight
 
@@ -395,12 +521,10 @@ open class ExpandablePageLayout @JvmOverloads constructor(
     parentToolbar!!.translationY = targetTranslationY
   }
 
-  internal fun stopAnyOngoingPageAnimation() {
+  fun stopAnyOngoingAnimation() {
+    stopDimensionAnimation()
     animate().cancel()
-    stopToolbarAnimation()
-  }
-
-  private fun stopToolbarAnimation() {
+    contentCoverAnimator.cancel()
     toolbarAnimator.cancel()
   }
 
@@ -415,7 +539,7 @@ open class ExpandablePageLayout @JvmOverloads constructor(
   fun setNestedExpandablePage(nestedPage: ExpandablePageLayout) {
     val old = this.nestedPage
     if (old != null) {
-      old.internalStateCallbacksForNestedPage = InternalPageCallbacks.NoOp()
+      old.internalStateCallbacksForNestedPage = NoOp()
     }
 
     this.nestedPage = nestedPage
@@ -457,14 +581,35 @@ open class ExpandablePageLayout @JvmOverloads constructor(
     }
   }
 
-  override fun draw(canvas: Canvas) {
-    if (currentState == PageState.COLLAPSED) {
-      return
+  override fun dispatchDraw(canvas: Canvas) {
+    if (currentState != PageState.COLLAPSED) {
+      super.dispatchDraw(canvas)
     }
-    super.draw(canvas)
+
+    ignoreDrawableInvalidates = true
+    if (background != null) {
+      val alphaBackup = background.alpha
+      background.alpha = 255 - (255 * contentOpacity).toInt()
+      background.draw(canvas)
+      background.alpha = alphaBackup
+    }
+    ignoreDrawableInvalidates = false
+
+    dimDrawable?.setBounds(0, 0, width, height)
+    dimDrawable?.draw(canvas)
   }
 
-  override fun drawChild(canvas: Canvas, child: View, drawingTime: Long): Boolean {
+  override fun invalidateDrawable(drawable: Drawable) {
+    if (!ignoreDrawableInvalidates) {
+      super.invalidateDrawable(drawable)
+    }
+  }
+
+  override fun drawChild(
+    canvas: Canvas,
+    child: View,
+    drawingTime: Long
+  ): Boolean {
     // When this page is fully covered by a nested ExpandablePage, avoid drawing any other child Views.
     return if (isFullyCoveredByNestedPage && child !is ExpandablePageLayout) {
       false
@@ -473,12 +618,17 @@ open class ExpandablePageLayout @JvmOverloads constructor(
     }
   }
 
+  private fun dispatchOnPagePullStartedCallbacks() {
+    internalStateCallbacksForNestedPage.onPagePullStarted()
+    internalStateCallbacksForRecyclerView.onPagePullStarted()
+  }
+
   private fun dispatchOnPagePullCallbacks(deltaY: Float) {
     internalStateCallbacksForNestedPage.onPagePull(deltaY)
     internalStateCallbacksForRecyclerView.onPagePull(deltaY)
   }
 
-  private fun dispatchOnPageReleaseCallback(collapseEligible: Boolean) {
+  protected open fun dispatchOnPageReleaseCallback(collapseEligible: Boolean) {
     internalStateCallbacksForNestedPage.onPageRelease(collapseEligible)
     internalStateCallbacksForRecyclerView.onPageRelease(collapseEligible)
   }
@@ -487,10 +637,9 @@ open class ExpandablePageLayout @JvmOverloads constructor(
     internalStateCallbacksForNestedPage.onPageAboutToExpand()
     internalStateCallbacksForRecyclerView.onPageAboutToExpand()
 
-    for (i in stateChangeCallbacks.indices.reversed()) {
-      stateChangeCallbacks[i].onPageAboutToExpand(expandAnimDuration)
+    for (callback in stateChangeCallbacks) {
+      callback.onPageAboutToExpand(expandAnimDuration)
     }
-
     onPageAboutToExpand(animationDurationMillis)
 
     // The state change must happen after the subscribers have been
@@ -502,8 +651,8 @@ open class ExpandablePageLayout @JvmOverloads constructor(
     changeState(PageState.EXPANDED)
     dispatchOnPageFullyCoveredCallback()
 
-    for (i in stateChangeCallbacks.indices.reversed()) {
-      stateChangeCallbacks[i].onPageExpanded()
+    for (callback in stateChangeCallbacks) {
+      callback.onPageExpanded()
     }
 
     onPageExpanded()
@@ -523,10 +672,9 @@ open class ExpandablePageLayout @JvmOverloads constructor(
     internalStateCallbacksForNestedPage.onPageAboutToCollapse()
     internalStateCallbacksForRecyclerView.onPageAboutToCollapse()
 
-    for (i in stateChangeCallbacks.indices.reversed()) {
-      stateChangeCallbacks[i].onPageAboutToCollapse(animationDurationMillis)
+    for (callback in stateChangeCallbacks) {
+      callback.onPageAboutToCollapse(animationDurationMillis)
     }
-
     onPageAboutToCollapse(animationDurationMillis)
 
     // The state change must happen after the subscribers have been
@@ -540,8 +688,8 @@ open class ExpandablePageLayout @JvmOverloads constructor(
     internalStateCallbacksForNestedPage.onPageCollapsed()
     internalStateCallbacksForRecyclerView.onPageCollapsed()
 
-    for (i in stateChangeCallbacks.indices.reversed()) {
-      stateChangeCallbacks[i].onPageCollapsed()
+    for (callback in stateChangeCallbacks) {
+      callback.onPageCollapsed()
     }
     onPageCollapsed()
   }
@@ -573,21 +721,32 @@ open class ExpandablePageLayout @JvmOverloads constructor(
    * Offer a pull-to-collapse to a listener if it wants to block it. If a nested page is registered
    * and the touch was made on it, block it right away.
    */
-  internal fun handleOnPullToCollapseIntercept(event: MotionEvent, downX: Float, downY: Float, deltaUpwardSwipe: Boolean): InterceptResult {
+  internal fun handleOnPullToCollapseIntercept(
+    downX: Float,
+    downY: Float,
+    deltaUpwardSwipe: Boolean
+  ): InterceptResult {
     val nestedPageCopy = nestedPage
 
-    return if (nestedPageCopy != null
+    @Suppress("DEPRECATION")
+    if (nestedPageCopy != null
         && nestedPageCopy.isExpandedOrExpanding
-        && nestedPageCopy.clippedDimens.contains(downX.toInt(), downY.toInt())) {
+        && nestedPageCopy.clippedDimens.contains(downX.toInt(), downY.toInt())
+    ) {
       // Block this pull if it was made inside a nested page. Let the nested
       // page's pull-listener consume this event. I should use nested scrolling
       // in the future to make this smarter.
       // TODO: 20/03/17 Do we even need to call the nested page's listener?
-      nestedPageCopy.handleOnPullToCollapseIntercept(event, downX, downY, deltaUpwardSwipe)
-      InterceptResult.INTERCEPTED
+      nestedPageCopy.handleOnPullToCollapseIntercept(downX, downY, deltaUpwardSwipe)
+      return InterceptResult.INTERCEPTED
 
-    } else run {
-      pullToCollapseInterceptor(downX, downY, deltaUpwardSwipe)
+    } else {
+      val interceptor = pullToCollapseInterceptor
+
+      return when {
+        interceptor != null -> interceptor(downX, downY, deltaUpwardSwipe)
+        else -> InterceptResult.IGNORED
+      }
     }
   }
 
@@ -596,7 +755,11 @@ open class ExpandablePageLayout @JvmOverloads constructor(
    * bottom of the toolbar. When this page is collapsing or being pulled downwards.
    * the toolbar will be animated back to its position.
    */
-  fun pushParentToolbarOnExpand(toolbar: Toolbar) {
+  fun pushParentToolbarOnExpand(toolbar: View?) {
+    if (this.parentToolbar != toolbar) {
+      parentToolbar?.translationY = 0f
+      toolbarAnimator.cancel()
+    }
     this.parentToolbar = toolbar
   }
 
@@ -609,25 +772,56 @@ open class ExpandablePageLayout @JvmOverloads constructor(
   }
 
   /**
-   * Listener that gets called when this page is being pulled.
+   * Add a listener that gets called when this page is pulled.
    */
-  fun addOnPullListener(listener: PullToCollapseListener.OnPullListener) {
-    pullToCollapseListener.addOnPullListener(listener)
+  fun addOnPullListener(listener: OnExpandablePagePullListener) {
+    nestedScroller.addOnPullListener(listener)
   }
 
-  fun removeOnPullListener(pullListener: PullToCollapseListener.OnPullListener) {
-    pullToCollapseListener.removeOnPullListener(pullListener)
+  fun removeOnPullListener(pullListener: OnExpandablePagePullListener) {
+    nestedScroller.removeOnPullListener(pullListener)
+  }
+
+  override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+    nestedScroller.storeTouchEvent(ev)
+    return isExpandedOrExpanding && super.dispatchTouchEvent(ev)
+  }
+
+  override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
+    return touchListener.onInterceptTouch(ev) || super.onInterceptTouchEvent(ev)
+  }
+
+  @SuppressLint("ClickableViewAccessibility")
+  override fun onTouchEvent(ev: MotionEvent): Boolean {
+    return touchListener.onTouch(ev) || super.onTouchEvent(ev)
+  }
+
+  override fun onStartNestedScroll(child: View, target: View, axes: Int, type: Int): Boolean {
+    // Accept all nested scroll events from children. The decision of whether
+    // or not to actually scroll is calculated inside onNestedPreScroll().
+    return pullToCollapseEnabled && axes and SCROLL_AXIS_VERTICAL != 0
+  }
+
+  override fun onNestedPreScroll(target: View, dx: Int, dy: Int, consumed: IntArray, type: Int) {
+    nestedScroller.onNestedPreScroll(target, dy, consumed, type)
+  }
+
+  override fun onStopNestedScroll(target: View, type: Int) {
+    nestedScroller.onStopNestedScroll(type)
   }
 
   companion object {
-
     private var suppressLayoutMethod: Method? = null
 
     // TODO: Move to a different class.
-    private fun setSuppressLayoutMethodUsingReflection(layout: ExpandablePageLayout, suppress: Boolean) {
+    private fun setSuppressLayoutMethodUsingReflection(
+      layout: ExpandablePageLayout,
+      suppress: Boolean
+    ) {
       try {
         if (suppressLayoutMethod == null) {
-          suppressLayoutMethod = ViewGroup::class.java.getMethod("suppressLayout", Boolean::class.javaPrimitiveType)
+          suppressLayoutMethod = ViewGroup::class.java
+              .getMethod("suppressLayout", Boolean::class.javaPrimitiveType)
         }
         suppressLayoutMethod!!.invoke(layout, suppress)
       } catch (e: Throwable) {
@@ -636,3 +830,9 @@ open class ExpandablePageLayout @JvmOverloads constructor(
     }
   }
 }
+
+@Parcelize
+private data class ExpandablePageSavedState(
+  val superState: Parcelable?,
+  val state: ExpandablePageLayout.PageState
+) : Parcelable

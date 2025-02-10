@@ -8,21 +8,23 @@ import android.graphics.drawable.Drawable
 import android.os.Parcelable
 import android.util.AttributeSet
 import android.view.MotionEvent
-import android.view.View
 import android.view.Window
-import androidx.annotation.Px
-import androidx.recyclerview.widget.LinearLayoutManager
-import kotlinx.android.parcel.Parcelize
+import me.saket.inboxrecyclerview.InternalPageCallbacks.NoOp
 import me.saket.inboxrecyclerview.animation.ItemExpandAnimator
-import me.saket.inboxrecyclerview.dimming.TintPainter
+import me.saket.inboxrecyclerview.dimming.AnimatedVisibilityColorDrawable
+import me.saket.inboxrecyclerview.dimming.DimPainter
+import me.saket.inboxrecyclerview.expander.AdapterIdBasedItem
+import me.saket.inboxrecyclerview.expander.AdapterIdBasedItemExpander
+import me.saket.inboxrecyclerview.expander.InboxItemExpander
 import me.saket.inboxrecyclerview.page.ExpandablePageLayout
 
 /**
  * A RecyclerView where items can expand and collapse to and from an [ExpandablePageLayout].
  */
-class InboxRecyclerView(
-    context: Context,
-    attrs: AttributeSet
+@Suppress("LeakingThis")
+open class InboxRecyclerView @JvmOverloads constructor(
+  context: Context,
+  attrs: AttributeSet? = null
 ) : ScrollSuppressibleRecyclerView(context, attrs), InternalPageCallbacks {
 
   /** Controls how [InboxRecyclerView] items are animated when the page is moving. */
@@ -31,115 +33,119 @@ class InboxRecyclerView(
       val old = field
       field = value
 
-      if (pageSetupDone) {
-        old.onDetachRecyclerView(this)
-        value.onAttachRecyclerView(this)
+      expandablePage?.let { page ->
+        old.onDetachRecyclerView()
+        value.onAttachRecyclerView(this, page)
       }
     }
 
   /** Controls how items are dimmed when the page is expanding/collapsing. */
-  var tintPainter: TintPainter = TintPainter.noOp()
+  var dimPainter: DimPainter = DimPainter.none()
     set(value) {
       val old = field
       field = value
 
-      if (pageSetupDone) {
-        old.onDetachRecyclerView(this)
-        field.onAttachRecyclerView(this)
+      expandablePage?.let { page ->
+        old.onDetachRecyclerView(resetDim = false)
+        field.onAttachRecyclerView(this, page)
       }
     }
 
+  @Suppress("unused")
+  @Deprecated("Use dimPainter instead", ReplaceWith("dimPainter"))
+  var tintPainter: DimPainter
+    get() = dimPainter
+    set(value) { dimPainter = value }
+
   /** Details about the currently expanded item. */
-  var expandedItem: ExpandedItem = ExpandedItem.EMPTY
+  var expandedItemLoc: ExpandedItemLocation = ExpandedItemLocation.EMPTY
 
-  lateinit var page: ExpandablePageLayout
-    private set
+  @Suppress("unused")
+  @Deprecated("Use expandedItemLoc instead", ReplaceWith("expandedItemLoc"))
+  var expandedItem: ExpandedItemLocation
+    get() = expandedItemLoc
+    set(value) { expandedItemLoc = value }
 
-  internal var pageSetupDone: Boolean = false
+  /** See [InboxItemExpander]. */
+  var itemExpander: InboxItemExpander<*> = AdapterIdBasedItemExpander(requireStableIds = true)
+    set(value) {
+      field = value
+      field.recyclerView = this
+    }
+
+  /**
+   * The expandable page to be used with this list.
+   */
+  var expandablePage: ExpandablePageLayout? = null
+    set(newPage) {
+      val oldPage = field
+      if (oldPage === newPage) {
+        return
+      }
+
+      field = newPage
+
+      // The old page may have gotten removed midway a collapse animation,
+      // causing this list's layout to be stuck as disabled. Clear it here.
+      if (newPage == null || newPage.isCollapsedOrCollapsing) {
+        suppressLayout(false)
+      }
+
+      if (oldPage != null) {
+        dimPainter.onDetachRecyclerView(resetDim = true)
+        itemExpandAnimator.onDetachRecyclerView()
+        oldPage.internalStateCallbacksForRecyclerView = NoOp()
+      }
+
+      if (newPage != null) {
+        dimPainter.onAttachRecyclerView(this, newPage)
+        itemExpandAnimator.onAttachRecyclerView(this, newPage)
+        newPage.internalStateCallbacksForRecyclerView = this
+      }
+    }
+
   private var activityWindow: Window? = null
   private var activityWindowOrigBackground: Drawable? = null
   private var isFullyCoveredByPage: Boolean = false
-  private val restorer = StateRestorer(this)
+  internal var dimDrawable: AnimatedVisibilityColorDrawable? = null
 
   init {
-    // For drawing dimming using TintPainter.
-    setWillNotDraw(false)
-
     // Because setters don't get called for default values.
     itemExpandAnimator = ItemExpandAnimator.split()
-    tintPainter = TintPainter.uncoveredArea()
+    dimPainter = DimPainter.listAndPage()
+    itemExpander = itemExpander
+  }
+
+  override fun dispatchDraw(canvas: Canvas) {
+    itemExpandAnimator.transformRecyclerViewCanvas(this, canvas) {
+      super.dispatchDraw(canvas)
+    }
+    dimDrawable?.setBounds(0, 0, width, height)
+    dimDrawable?.draw(canvas)
   }
 
   override fun onSaveInstanceState(): Parcelable {
-    return restorer.save(super.onSaveInstanceState())
+    return itemExpander.saveState(super.onSaveInstanceState())
   }
 
   override fun onRestoreInstanceState(state: Parcelable) {
-    val superState = restorer.restore(state)
+    val superState = itemExpander.restoreState(state)
     super.onRestoreInstanceState(superState)
   }
 
   override fun onDetachedFromWindow() {
-    if (pageSetupDone) {
-      itemExpandAnimator.onDetachRecyclerView(this)
-      tintPainter.onDetachRecyclerView(this)
-    }
+    expandablePage = null
     super.onDetachedFromWindow()
   }
 
-  /**
-   * Set the [ExpandablePageLayout] to be used with this list.
-   * The pull-to-collapse threshold is set to 85% of the standard toolbar height.
-   */
-  fun setExpandablePage(page: ExpandablePageLayout) {
-    setExpandablePage(page, (Views.toolbarHeight(context) * 0.85F).toInt())
-  }
-
-  /**
-   * Set the [ExpandablePageLayout] to be used with this list.
-   * @param collapseDistanceThreshold Minimum Y-distance the page has to be pulled before it's eligible for collapse.
-   */
-  fun setExpandablePage(page: ExpandablePageLayout, @Px collapseDistanceThreshold: Int) {
-    setExpandablePageInternal(page)
-    page.pullToCollapseThresholdDistance = collapseDistanceThreshold
-  }
-
-  private fun setExpandablePageInternal(expandablePage: ExpandablePageLayout) {
-    if (pageSetupDone) {
-      throw IllegalStateException("Expandable page is already set.")
+  override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+    if (expandablePage?.isCollapsed == false) {
+      // Don't let the user open another item midway an animation.
+      return true
     }
-    pageSetupDone = true
-    page = expandablePage
 
-    restorer.restoreIfPossible()
-    expandablePage.internalStateCallbacksForRecyclerView = this
-    tintPainter.onAttachRecyclerView(this)
-    itemExpandAnimator.onAttachRecyclerView(this)
-  }
-
-  override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-    super.onSizeChanged(w, h, oldw, oldh)
-
-    // The items must maintain their positions, relative to the new bounds. Wait for
-    // Android to draw the child Views. Calling getChildCount() right now will return
-    // old values (that is, no. of children that were present before this height
-    // change happened.
-    if (pageSetupDone) {
-      executeOnNextLayout {
-        if (page.currentState === ExpandablePageLayout.PageState.EXPANDING) {
-          page.animatePageExpandCollapse(true, width, height, expandedItem)
-
-        } else if (page.currentState === ExpandablePageLayout.PageState.EXPANDED) {
-          page.alignPageToCoverScreen()
-        }
-      }
-    }
-  }
-
-  override fun dispatchTouchEvent(ev: MotionEvent?): Boolean {
     val dispatched = super.dispatchTouchEvent(ev)
-
-    return if (pageSetupDone && page.isExpanded) {
+    return if (expandablePage?.isExpanded == true) {
       // Intentionally leak touch events behind just in case the content page has
       // a lower z-index than than this list. This is an ugly hack, but I cannot
       // think of a way to enforce view positions. Fortunately this hack will not
@@ -152,107 +158,102 @@ class InboxRecyclerView(
     }
   }
 
-  private fun ensureSetup() {
-    if (pageSetupDone.not()) {
-      throw IllegalStateException("Did you forget to call InboxRecyclerView.setup()?")
-    }
-    if (adapter == null) {
-      throw IllegalStateException("Adapter isn't attached yet.")
-    }
+  private fun ensureSetup(page: ExpandablePageLayout?): ExpandablePageLayout {
+    requireNotNull(page) { "Did you forget to set InboxRecyclerView#expandablePage?" }
+    requireNotNull(adapter) { "Adapter isn't attached yet!" }
+    return page
   }
 
   /**
-   * @param itemId ID of the item to expand.
+   * Expand an item by its adapter-ID.
+   *
+   * InboxRecyclerView uses adapter-IDs by default for expanding/collapsing items,
+   * but you can also use any [Parcelable] object by using a custom item expander.
+   * See [InboxItemExpander].
    */
   @JvmOverloads
-  fun expandItem(itemId: Long, immediate: Boolean = false) {
-    ensureSetup()
-
-    if (isLaidOut.not()) {
-      post { expandItem(itemId, immediate) }
-      return
+  fun expandItem(adapterId: Long, immediate: Boolean = false) {
+    val expander = itemExpander
+    check(expander is AdapterIdBasedItemExpander) {
+      "Can't expand an item by its adapter ID if a custom InboxItemExpander is set. " +
+          "Call expandItem on your InboxItemExpander instead."
     }
-
-    if (page.isExpandedOrExpanding) {
-      return
-    }
-
-    val adapter = adapter!!
-    var itemAdapterPosition: Int = -1
-    for (i in 0 until adapter.itemCount) {
-      if (adapter.getItemId(i) == itemId) {
-        itemAdapterPosition = i
-        break
-      }
-    }
-
-    val itemView: View? = (layoutManager as LinearLayoutManager).findViewByPosition(itemAdapterPosition)
-
-    if (itemView == null) {
-      // View got removed right when it was clicked to expand.
-      expandFromTop(immediate)
-      return
-    }
-
-    val itemViewPosition = indexOfChild(itemView)
-    val itemRect = Rect(
-        left + itemView.left,
-        top + itemView.top,
-        width - right + itemView.right,
-        top + itemView.bottom)
-
-    expandedItem = ExpandedItem(itemViewPosition, itemId, itemRect)
-    if (immediate) {
-      page.expandImmediately()
-    } else {
-      page.expand(expandedItem)
-    }
+    expander.expandItem(AdapterIdBasedItem(adapterId), immediate)
   }
 
   /**
-   * Expand from the top, pushing all items out of the window towards the bottom.
+   * Expand the page from the top.
    */
   @JvmOverloads
   fun expandFromTop(immediate: Boolean = false) {
-    ensureSetup()
+    itemExpander.expandItem(null, immediate)
+  }
 
-    if (isLaidOut.not()) {
-      post { expandFromTop(immediate) }
+  internal fun expandOnceLaidOut(immediate: Boolean) {
+    val page = ensureSetup(expandablePage)
+    doOnLayout2 {
+      page.doOnLayout2 {
+        expandInternal(immediate)
+      }
+    }
+  }
+
+  private fun expandInternal(immediate: Boolean) {
+    val page = expandablePage!!
+    if (!page.isCollapsed) {
+      // Expanding an item while another is already
+      // expanding results in unpredictable animation.
+      if (!expandedItemLoc.isNotEmpty()) {
+        // Useful if the page was expanded immediately as a result of a (manual)
+        // state restoration before this RecyclerView could restore its state.
+        expandedItemLoc = itemExpander.captureExpandedItemInfo()
+      }
       return
     }
 
-    if (page.isExpandedOrExpanding) {
-      return
-    }
-
-    expandedItem = ExpandedItem.EMPTY.copy(expandedItemLocationRect = Rect(left, top, right, top))
-
+    expandedItemLoc = itemExpander.captureExpandedItemInfo()
     if (immediate) {
       page.expandImmediately()
     } else {
-      page.expand(expandedItem)
+      page.expand(expandedItemLoc)
     }
   }
 
   fun collapse() {
-    ensureSetup()
+    val page = ensureSetup(expandablePage)
 
     if (page.isCollapsedOrCollapsing.not()) {
-      page.collapse(expandedItem)
+      // List items may have changed while the page was
+      // expanded. Find the expanded item's location again.
+      expandedItemLoc = itemExpander.captureExpandedItemInfo()
+      page.collapse(expandedItemLoc)
     }
   }
 
-  override fun onPageAboutToExpand() {
-    isLayoutFrozen = true
+  override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
+    super.onLayout(changed, l, t, r, b)
+
+    // This is kind of a hack, but I want the layout to be frozen only after this list
+    // has processed its initial batch of child Views. Otherwise this list stays empty
+    // after a state restoration, until the page is collapsed.
+    if (isLaidOut && childCount > 0 && expandablePage?.isExpandedOrExpanding == true) {
+      suppressLayout(true)
+    }
   }
 
   override fun onPageAboutToCollapse() {
-    isLayoutFrozen = false
     onPageBackgroundVisible()
   }
 
   override fun onPageCollapsed() {
-    expandedItem = ExpandedItem.EMPTY
+    suppressLayout(false)
+    expandedItemLoc = ExpandedItemLocation.EMPTY
+    itemExpander.setItem(null)
+  }
+
+  override fun onPagePullStarted() {
+    // List items may have changed while the page was expanded. Find the expanded item's location again.
+    expandedItemLoc = itemExpander.captureExpandedItemInfo()
   }
 
   override fun onPagePull(deltaY: Float) {
@@ -282,17 +283,33 @@ class InboxRecyclerView(
     activityWindow?.setBackgroundDrawable(activityWindowOrigBackground)
   }
 
-  override fun draw(canvas: Canvas) {
-    super.draw(canvas)
+  override fun canScrollProgrammatically(): Boolean {
+    val page = expandablePage
+    return page == null || page.isCollapsed
+  }
 
-    // Dimming behind the expandable page.
-    if (pageSetupDone) {
-      tintPainter.drawTint(canvas)
+  override fun onDrawForeground(canvas: Canvas) {
+    // If an item is expanded, its z-index changes from lower than
+    // that of the scrollbars to a higher value and looks a bit abrupt.
+    maybeHideScrollbarsAndRun {
+      super.onDrawForeground(canvas)
     }
   }
 
-  override fun canScrollProgrammatically(): Boolean {
-    return pageSetupDone.not() || page.isCollapsed
+  private inline fun maybeHideScrollbarsAndRun(crossinline run: () -> Unit) {
+    val page = expandablePage
+    if (page == null || page.isCollapsed || scrollBarStyle != SCROLLBARS_INSIDE_OVERLAY) {
+      run()
+      return
+    }
+
+    val wasVerticalEnabled = isVerticalScrollBarEnabled
+    val wasHorizEnabled = isHorizontalScrollBarEnabled
+    isVerticalScrollBarEnabled = false
+    isHorizontalScrollBarEnabled = false
+    run()
+    isVerticalScrollBarEnabled = wasVerticalEnabled
+    isHorizontalScrollBarEnabled = wasHorizEnabled
   }
 
   /**
@@ -300,62 +317,42 @@ class InboxRecyclerView(
    * background when the [ExpandablePageLayout] is expanded. No point in drawing
    * it when it's not visible to the user.
    **/
+  // TODO: deprecate.
   fun optimizeActivityBackgroundOverdraw(activity: Activity) {
     activityWindow = activity.window
     activityWindowOrigBackground = activity.window.decorView.background
   }
 
   override fun setAdapter(adapter: Adapter<*>?) {
-    ensureStableIds(adapter)
-    val isLayoutFrozenBak = isLayoutFrozen
+    val wasLayoutSuppressed = isLayoutSuppressed
     super.setAdapter(adapter)
-
-    // isLayoutFrozen is reset when the adapter is changed.
-    isLayoutFrozen = isLayoutFrozenBak
-
-    restorer.restoreIfPossible()
+    suppressLayout(wasLayoutSuppressed) // isLayoutSuppressed is reset when the adapter is changed.
   }
 
-  override fun swapAdapter(adapter: Adapter<*>?, removeAndRecycleExistingViews: Boolean) {
-    ensureStableIds(adapter)
-    val isLayoutFrozenBak = isLayoutFrozen
+  override fun swapAdapter(
+    adapter: Adapter<*>?,
+    removeAndRecycleExistingViews: Boolean
+  ) {
+    val wasLayoutSuppressed = isLayoutSuppressed
     super.swapAdapter(adapter, removeAndRecycleExistingViews)
-
-    isLayoutFrozen = isLayoutFrozenBak
-    restorer.restoreIfPossible()
+    suppressLayout(wasLayoutSuppressed) // isLayoutSuppressed is reset when the adapter is changed.
   }
 
-  private fun ensureStableIds(adapter: Adapter<*>?) {
-    adapter?.apply {
-      if (hasStableIds().not()) {
-        // Stable IDs are required because the expanded item's adapter position can change, but ID cannot.
-        throw AssertionError("Adapter needs to have stable IDs so that the expanded item can be restored across orientation changes.")
-      }
-    }
-  }
-
-  /** Details of the currently expanded item. */
-  @Parcelize
-  data class ExpandedItem(
+  data class ExpandedItemLocation(
       // Index of the currently expanded item's
       // View. This is not the adapter index.
-      val viewIndex: Int,
+    val viewIndex: Int,
 
-      // Adapter ID of the currently expanded item.
-      val itemId: Long,
+      // Original location of the currently expanded item.
+      // Used for restoring states after collapsing.
+    val locationOnScreen: Rect
+  ) {
 
-      // Original location of the currently expanded item (that is, when the user
-      // selected this item). Can be used for restoring states after collapsing.
-      val expandedItemLocationRect: Rect
-
-  ) : Parcelable {
-
-    internal fun isEmpty(): Boolean {
-      return viewIndex == -1 && itemId == -1L && expandedItemLocationRect.width() == 0 && expandedItemLocationRect.height() == 0
-    }
+    internal fun isEmpty(): Boolean = this == EMPTY
+    internal fun isNotEmpty(): Boolean = !isEmpty()
 
     companion object {
-      internal val EMPTY = ExpandedItem(itemId = -1, viewIndex = -1, expandedItemLocationRect = Rect(0, 0, 0, 0))
+      internal val EMPTY = ExpandedItemLocation(viewIndex = -1, locationOnScreen = Rect(0, 0, 0, 0))
     }
   }
 }

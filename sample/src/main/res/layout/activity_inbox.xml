@@ -11,25 +11,30 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:clipToPadding="false"
+    android:paddingTop="@dimen/emailthread_item_vertical_margin"
     android:paddingBottom="@dimen/bottom_spacing_for_bottomappbar"
-    android:paddingTop="@dimen/emailthread_item_vertical_margin" />
+    tools:layoutManager="LinearLayoutManager"
+    tools:listitem="@layout/list_email_thread" />
 
   <me.saket.inboxrecyclerview.page.ExpandablePageLayout
     android:id="@+id/inbox_email_thread_page"
     android:layout_width="match_parent"
-    android:layout_height="match_parent" />
+    android:layout_height="match_parent"
+    android:background="@color/email_thread_background"
+    android:elevation="20dp" />
 
   <com.google.android.material.bottomappbar.BottomAppBar
     android:id="@+id/inbox_bottomappbar"
     style="@style/Widget.MaterialComponents.BottomAppBar.Colored"
     android:layout_width="match_parent"
-    android:layout_height="wrap_content"
-    android:layout_gravity="bottom">
+    android:layout_height="56dp"
+    android:layout_gravity="bottom"
+    android:elevation="20dp">
 
     <ImageButton
       android:id="@+id/inbox_settings"
       android:layout_width="wrap_content"
-      android:layout_height="wrap_content"
+      android:layout_height="match_parent"
       android:layout_gravity="bottom|end"
       android:background="?attr/selectableItemBackgroundBorderless"
       android:padding="16dp"
@@ -41,7 +46,8 @@
     android:id="@+id/inbox_fab"
     android:layout_width="wrap_content"
     android:layout_height="wrap_content"
-    android:src="@drawable/avd_edit_to_reply_all"
     android:tint="#172629"
-    app:layout_anchor="@+id/inbox_bottomappbar" />
+    app:elevation="20dp"
+    app:layout_anchor="@+id/inbox_bottomappbar"
+    tools:ignore="ContentDescription" />
 </androidx.coordinatorlayout.widget.CoordinatorLayout>

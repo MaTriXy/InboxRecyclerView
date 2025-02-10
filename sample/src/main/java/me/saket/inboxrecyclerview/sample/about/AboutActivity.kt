@@ -2,6 +2,7 @@ package me.saket.inboxrecyclerview.sample.about
 
 import android.content.Context
 import android.content.Intent
+import android.content.Intent.ACTION_VIEW
 import android.net.Uri
 import android.os.Bundle
 import android.view.View
@@ -10,6 +11,7 @@ import android.widget.TextView
 import kotterknife.bindView
 import me.saket.bettermovementmethod.BetterLinkMovementMethod
 import me.saket.inboxrecyclerview.PullCollapsibleActivity
+import me.saket.inboxrecyclerview.page.PageCollapseEligibilityHapticFeedback
 import me.saket.inboxrecyclerview.sample.R
 
 class AboutActivity : PullCollapsibleActivity() {
@@ -28,17 +30,17 @@ class AboutActivity : PullCollapsibleActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     setContentView(R.layout.activity_about)
-    expandFromTop()
+    activityPageLayout.addOnPullListener(PageCollapseEligibilityHapticFeedback(activityPageLayout))
 
     navigationUpButton.setOnClickListener {
       finish()
     }
 
-    bodyTextView.text = resources.getText(R.string.about_body)
+    bodyTextView.text = resources.getText(R.string.about_body).trim()
     BetterLinkMovementMethod.linkifyHtml(bodyTextView)
 
     githubLinkView.setOnClickListener {
-      startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/saket/inboxrecyclerview")))
+      startActivity(Intent(ACTION_VIEW, Uri.parse("https://github.com/saket/inboxrecyclerview")))
     }
   }
 }

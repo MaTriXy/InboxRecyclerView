@@ -9,7 +9,7 @@ import android.graphics.Rect
 import android.util.AttributeSet
 import android.view.View
 import android.view.ViewOutlineProvider
-import android.widget.RelativeLayout
+import android.widget.FrameLayout
 import androidx.interpolator.view.animation.FastOutSlowInInterpolator
 import me.saket.inboxrecyclerview.ANIMATION_START_DELAY
 
@@ -20,11 +20,10 @@ import me.saket.inboxrecyclerview.ANIMATION_START_DELAY
 abstract class BaseExpandablePageLayout @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null
-) : RelativeLayout(context, attrs) {
+) : FrameLayout(context, attrs) {
 
-  /** The visible portion of this layout. */
-  val clippedDimens: Rect
-    get() = clipBounds
+  /** The visible portion of this layout. Warning: this is mutable. Use wisely! */
+  internal val clippedDimens: Rect = Rect()
 
   private var dimensionAnimator: ValueAnimator = ObjectAnimator()
   private var isFullyVisible: Boolean = false
@@ -33,36 +32,43 @@ abstract class BaseExpandablePageLayout @JvmOverloads constructor(
   var animationInterpolator: TimeInterpolator = DEFAULT_ANIM_INTERPOLATOR
 
   init {
-    clipBounds = Rect()
+    clipBounds = clippedDimens
 
     outlineProvider = object : ViewOutlineProvider() {
       override fun getOutline(view: View, outline: Outline) {
-        outline.setRect(0, 0, clipBounds.width(), clipBounds.height())
-        outline.alpha = clipBounds.height().toFloat() / height
+        outline.setRect(0, 0, clippedDimens.width(), clippedDimens.height())
+        outline.alpha = clippedDimens.height().toFloat() / height
       }
     }
   }
 
-  override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-    super.onSizeChanged(w, h, oldw, oldh)
-
-    if (isFullyVisible) {
-      setClippedDimensions(w, h)
-    }
+  override fun onDetachedFromWindow() {
+    dimensionAnimator.cancel()
+    super.onDetachedFromWindow()
   }
 
-  fun animateDimensions(toWidth: Int, toHeight: Int) {
+  protected fun stopDimensionAnimation() {
     dimensionAnimator.cancel()
+  }
+
+  @Suppress("NAME_SHADOWING")
+  fun animateDimensions(toWidth: Int, toHeight: Int) {
+    stopDimensionAnimation()
+
+    val isResettingClipping = toWidth == width && toHeight == height
 
     dimensionAnimator = ObjectAnimator.ofFloat(0F, 1F).apply {
       duration = animationDurationMillis
       interpolator = animationInterpolator
       startDelay = ANIMATION_START_DELAY
 
-      val fromWidth = clipBounds.width()
-      val fromHeight = clipBounds.height()
+      val fromWidth = clippedDimens.width()
+      val fromHeight = clippedDimens.height()
 
       addUpdateListener {
+        val toWidth = if (isResettingClipping) width else toWidth
+        val toHeight = if (isResettingClipping) height else toHeight
+
         val scale = it.animatedValue as Float
         val newWidth = ((toWidth - fromWidth) * scale + fromWidth).toInt()
         val newHeight = ((toHeight - fromHeight) * scale + fromHeight).toInt()
@@ -73,8 +79,11 @@ abstract class BaseExpandablePageLayout @JvmOverloads constructor(
   }
 
   fun setClippedDimensions(newClippedWidth: Int, newClippedHeight: Int) {
-    isFullyVisible = newClippedWidth > 0 && newClippedHeight > 0 && newClippedWidth == width && newClippedHeight == height
-    clipBounds = Rect(0, 0, newClippedWidth, newClippedHeight)
+    isFullyVisible = newClippedWidth > 0 && newClippedHeight > 0
+        && newClippedWidth == width
+        && newClippedHeight == height
+    clippedDimens.set(0, 0, newClippedWidth, newClippedHeight)
+    clipBounds = clippedDimens
     invalidateOutline()
   }
 
@@ -84,7 +93,7 @@ abstract class BaseExpandablePageLayout @JvmOverloads constructor(
   }
 
   companion object {
-    private const val DEFAULT_ANIM_DURATION = 250L
+    private const val DEFAULT_ANIM_DURATION = 300L
     private val DEFAULT_ANIM_INTERPOLATOR = FastOutSlowInInterpolator()
   }
 }

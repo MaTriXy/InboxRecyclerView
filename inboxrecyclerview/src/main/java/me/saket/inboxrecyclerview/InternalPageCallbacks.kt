@@ -3,7 +3,7 @@ package me.saket.inboxrecyclerview
 /** Used internally, by [InboxRecyclerView]. */
 internal interface InternalPageCallbacks {
 
-  fun onPageAboutToExpand()
+  fun onPageAboutToExpand() = Unit
 
   /**
    * Called when this page has fully covered the list. This can happen in two situations:
@@ -16,6 +16,9 @@ internal interface InternalPageCallbacks {
 
   /** Page is no longer visible at this point. */
   fun onPageCollapsed()
+
+  /** Page will start getting pulled. */
+  fun onPagePullStarted() = Unit
 
   /** Page is being pulled. Sync the scroll with the list. */
   fun onPagePull(deltaY: Float)

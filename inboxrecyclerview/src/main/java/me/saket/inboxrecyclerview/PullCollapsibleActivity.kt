@@ -11,6 +11,7 @@ import android.view.View
 import android.view.ViewGroup
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import me.saket.inboxrecyclerview.page.SimplePageStateChangeCallbacks
 import me.saket.inboxrecyclerview.page.StandaloneExpandablePageLayout
 
 /**
@@ -20,9 +21,9 @@ import me.saket.inboxrecyclerview.page.StandaloneExpandablePageLayout
  * <item name="android:windowIsTranslucent">true</item>
  * <item name="android:colorBackgroundCacheHint">@null</item>
  */
+@Suppress("MemberVisibilityCanBePrivate")
 abstract class PullCollapsibleActivity : AppCompatActivity() {
-
-  private lateinit var activityPageLayout: StandaloneExpandablePageLayout
+  protected lateinit var activityPageLayout: StandaloneExpandablePageLayout
 
   private var expandCalled = false
   private var expandedFromRect: Rect? = null
@@ -71,35 +72,37 @@ abstract class PullCollapsibleActivity : AppCompatActivity() {
   override fun setContentView(view: View) {
     activityPageLayout = wrapInExpandablePage(view)
     super.setContentView(activityPageLayout)
+    if (entryAnimationEnabled) {
+      expandFromTop()
+    } else {
+      expandImmediately()
+    }
   }
 
   override fun setContentView(view: View, params: ViewGroup.LayoutParams) {
     activityPageLayout = wrapInExpandablePage(view)
     super.setContentView(activityPageLayout, params)
+    if (entryAnimationEnabled) {
+      expandFromTop()
+    } else {
+      expandImmediately()
+    }
   }
 
   private fun wrapInExpandablePage(view: View): StandaloneExpandablePageLayout {
     val pageLayout = StandaloneExpandablePageLayout(this)
-    pageLayout.elevation = resources.getDimensionPixelSize(R.dimen.pull_collapsible_activity_elevation).toFloat()
+    pageLayout.elevation = resources.getDimensionPixelSize(R.dimen.irv_pull_collapsible_activity_elevation).toFloat()
     pageLayout.background = windowBackgroundFromTheme()
 
     window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
 
     if (pullCollapsibleEnabled) {
       pageLayout.pullToCollapseThresholdDistance = standardToolbarHeight
-      pageLayout.callbacks = object : StandaloneExpandablePageLayout.Callbacks {
-        override fun onPageRelease(collapseEligible: Boolean) {
-          if (collapseEligible) {
-            finish()
-          }
-        }
-
-        override fun onPageCollapsed() {
-          superFinish()
-          overridePendingTransition(0, 0)
+      pageLayout.onPageRelease = { collapseEligible ->
+        if (collapseEligible) {
+          finish()
         }
       }
-
     } else {
       pageLayout.pullToCollapseEnabled = false
       pageLayout.expandImmediately()
@@ -111,17 +114,23 @@ abstract class PullCollapsibleActivity : AppCompatActivity() {
 
   protected fun expandFromTop() {
     expandCalled = true
-    activityPageLayout.executeOnMeasure {
-      val toolbarRect = Rect(0, standardToolbarHeight, activityPageLayout.width, standardToolbarHeight)
+    activityPageLayout.doOnLayout2 {
+      val pageLocation = activityPageLayout.locationOnScreen()
+      val toolbarRect = Rect(pageLocation.left, standardToolbarHeight, pageLocation.right, standardToolbarHeight)
       expandFrom(toolbarRect)
     }
+  }
+
+  protected fun expandImmediately() {
+    expandCalled = true
+    activityPageLayout.expandImmediately()
   }
 
   protected fun expandFrom(fromRect: Rect) {
     expandCalled = true
 
     expandedFromRect = fromRect
-    activityPageLayout.executeOnMeasure {
+    activityPageLayout.doOnLayout2 {
       if (wasActivityRecreated) {
         activityPageLayout.expandFrom(fromRect)
       } else {
@@ -136,16 +145,17 @@ abstract class PullCollapsibleActivity : AppCompatActivity() {
     // layout gets measured.
 
     if (pullCollapsibleEnabled && expandedFromRect != null) {
+      activityPageLayout.addStateChangeCallbacks(object : SimplePageStateChangeCallbacks() {
+        override fun onPageCollapsed() {
+          super@PullCollapsibleActivity.finish()
+          overridePendingTransition(0, 0)
+        }
+      })
       activityPageLayout.collapseTo(expandedFromRect!!)
+
     } else {
       super.finish()
     }
-  }
-
-  // Not sure how to inline this function in the call site.
-  // Someone with better Kotlin skills, please help?
-  private fun superFinish() {
-    super.finish()
   }
 
   override fun onOptionsItemSelected(item: MenuItem): Boolean {

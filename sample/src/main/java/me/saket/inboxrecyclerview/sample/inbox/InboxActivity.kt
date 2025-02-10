@@ -1,23 +1,29 @@
 package me.saket.inboxrecyclerview.sample.inbox
 
+import android.annotation.SuppressLint
+import android.content.Context
 import android.graphics.Color
 import android.graphics.drawable.AnimatedVectorDrawable
 import android.os.Bundle
+import android.util.TypedValue
+import android.util.TypedValue.COMPLEX_UNIT_DIP
 import android.view.View
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.content.res.AppCompatResources.getDrawable
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.jakewharton.rxrelay2.PublishRelay
 import kotterknife.bindView
 import me.saket.inboxrecyclerview.InboxRecyclerView
-import me.saket.inboxrecyclerview.dimming.TintPainter
+import me.saket.inboxrecyclerview.animation.ItemExpandAnimator
+import me.saket.inboxrecyclerview.dimming.DimPainter
 import me.saket.inboxrecyclerview.page.ExpandablePageLayout
+import me.saket.inboxrecyclerview.page.PageCollapseEligibilityHapticFeedback
 import me.saket.inboxrecyclerview.page.SimplePageStateChangeCallbacks
 import me.saket.inboxrecyclerview.sample.EmailRepository
 import me.saket.inboxrecyclerview.sample.R
 import me.saket.inboxrecyclerview.sample.about.AboutActivity
 import me.saket.inboxrecyclerview.sample.email.EmailThreadFragment
-import me.saket.inboxrecyclerview.sample.widgets.ReversibleAnimatedVectorDrawable
 
 class InboxActivity : AppCompatActivity() {
 
@@ -55,10 +61,19 @@ class InboxActivity : AppCompatActivity() {
     }
   }
 
+  @SuppressLint("CheckResult")
   private fun setupThreadList() {
     recyclerView.layoutManager = LinearLayoutManager(this)
-    recyclerView.setExpandablePage(emailPageLayout)
-    recyclerView.tintPainter = TintPainter.uncoveredArea(color = Color.WHITE, opacity = 0.65F)
+    recyclerView.expandablePage = emailPageLayout
+    recyclerView.dimPainter = DimPainter.listAndPage(
+        listColor = Color.WHITE,
+        listAlpha = 0.75F,
+        pageColor = Color.WHITE,
+        pageAlpha = 0.65f
+    )
+    recyclerView.itemExpandAnimator = ItemExpandAnimator.split()
+    emailPageLayout.pullToCollapseThresholdDistance = dp(90)
+    emailPageLayout.addOnPullListener(PageCollapseEligibilityHapticFeedback(emailPageLayout))
 
     threadsAdapter.submitList(EmailRepository.threads())
     recyclerView.adapter = threadsAdapter
@@ -70,6 +85,7 @@ class InboxActivity : AppCompatActivity() {
         }
   }
 
+  @SuppressLint("CheckResult")
   private fun setupThreadPage() {
     var threadFragment = supportFragmentManager.findFragmentById(emailPageLayout.id) as EmailThreadFragment?
     if (threadFragment == null) {
@@ -90,16 +106,26 @@ class InboxActivity : AppCompatActivity() {
   }
 
   private fun setupFab() {
-    val editToReplyAllIcon = ReversibleAnimatedVectorDrawable(fab.drawable as AnimatedVectorDrawable)
+    val avd = { iconRes: Int -> getDrawable(this, iconRes) as AnimatedVectorDrawable }
+    fab.setImageDrawable(avd(R.drawable.avd_edit_to_reply_all))
 
     emailPageLayout.addStateChangeCallbacks(object : SimplePageStateChangeCallbacks() {
       override fun onPageAboutToExpand(expandAnimDuration: Long) {
-        editToReplyAllIcon.play()
+        val icon = avd(R.drawable.avd_edit_to_reply_all)
+        fab.setImageDrawable(icon)
+        icon.start()
       }
 
       override fun onPageAboutToCollapse(collapseAnimDuration: Long) {
-        editToReplyAllIcon.reverse()
+        val icon = avd(R.drawable.avd_reply_all_to_edit)
+        fab.setImageDrawable(icon)
+        icon.start()
       }
     })
   }
+}
+
+private fun Context.dp(value: Int): Int {
+  val metrics = resources.displayMetrics
+  return TypedValue.applyDimension(COMPLEX_UNIT_DIP, value.toFloat(), metrics).toInt()
 }

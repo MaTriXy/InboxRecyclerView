@@ -4,45 +4,65 @@ import android.content.Context
 import android.graphics.Rect
 import android.util.AttributeSet
 import me.saket.inboxrecyclerview.InboxRecyclerView
+import me.saket.inboxrecyclerview.InboxRecyclerView.ExpandedItemLocation
+import me.saket.inboxrecyclerview.PullCollapsibleActivity
 
-/** Standalone because this page can live without an [InboxRecyclerView]. */
-class StandaloneExpandablePageLayout(
+/**
+ * An expandable page that can live without an accompanying [InboxRecyclerView].
+ * Can be used for making pull-collapsible screens where using [PullCollapsibleActivity]
+ * isn't an option.
+ *
+ * Usage:
+ *
+ * ```
+ * val pageLayout = findViewById<StandaloneExpandablePageLayout>(...)
+ * pageLayout.expandImmediately()
+ * pageLayout.onPageRelease = { collapseEligible ->
+ *   if (collapseEligible) {
+ *     exitWithAnimation()
+ *   }
+ * }
+ * ```
+ *
+ * where `exitWithAnimation()` can be used for playing your own exit
+ * animation, or for playing the page collapse animation.
+ *
+ * ```
+ * pageLayout.addStateChangeCallbacks(object : SimplePageStateChangeCallbacks() {
+ *   override fun onPageCollapsed() {
+ *     exit()
+ *   }
+ * })
+ * pageLayout.collapseTo(...)
+ * ```
+ */
+open class StandaloneExpandablePageLayout(
     context: Context,
     attrs: AttributeSet? = null
 ) : ExpandablePageLayout(context, attrs) {
 
-  internal interface Callbacks {
-
-    /**
-     * Page has fully collapsed and is no longer visible.
-     */
-    fun onPageCollapsed()
-
-    /**
-     * Page was released while being pulled.
-     *
-     * @param collapseEligible Whether the page was pulled enough for collapsing it.
-     */
-    fun onPageRelease(collapseEligible: Boolean)
-  }
-
-  internal lateinit var callbacks: Callbacks
+  /**
+   * Called when the page was pulled and released.
+   *
+   * @param collapseEligible Whether the page was pulled enough for collapsing it.
+   */
+  lateinit var onPageRelease: (collapseEligible: Boolean) -> Unit
 
   init {
-    collapsedAlpha = 1F
-    animationDurationMillis = 300
+    contentOpacityWhenCollapsed = 1F
+  }
 
-    addOnPullListener(object : SimpleOnPullListener() {
-      override fun onRelease(collapseEligible: Boolean) {
-        callbacks.onPageRelease(collapseEligible)
-      }
-    })
+  override fun dispatchOnPageReleaseCallback(collapseEligible: Boolean) {
+    // Do not let a parent InboxRecyclerView (if present) collapse this page.
+    onPageRelease(collapseEligible)
+  }
 
-    addStateChangeCallbacks(object : SimplePageStateChangeCallbacks() {
-      override fun onPageCollapsed() {
-        callbacks.onPageCollapsed()
-      }
-    })
+  override fun onAttachedToWindow() {
+    super.onAttachedToWindow()
+
+    if (::onPageRelease.isInitialized.not()) {
+      throw AssertionError("Did you forget to set onPageRelease?")
+    }
   }
 
   override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
@@ -55,19 +75,51 @@ class StandaloneExpandablePageLayout(
   }
 
   /**
-   * Expands this page with animation so that it fills the whole screen.
-   *
-   * @param fromShapeRect Initial dimensions of this page.
+   * Expand this page immediately.
    */
-  internal fun expandFrom(fromShapeRect: Rect) {
-    setClippedDimensions(width, 0)
-    expand(InboxRecyclerView.ExpandedItem(-1, -1, fromShapeRect))
+  public override fun expandImmediately() {
+    super.expandImmediately()
+  }
+
+  fun expandFromTop() {
+    if (isLaidOut.not()) {
+      post { expandFromTop() }
+      return
+    }
+
+    expand(
+        ExpandedItemLocation(
+            viewIndex = -1,
+            locationOnScreen = Rect(left, top, right, top)
+        )
+    )
+  }
+
+  fun collapseToTop() {
+    collapse(
+        ExpandedItemLocation(
+            viewIndex = -1,
+            locationOnScreen = Rect(left, top, right, top)
+        )
+    )
+  }
+
+  /**
+   * Expand this page with animation with `fromShapeRect` as its initial dimensions.
+   */
+  fun expandFrom(fromShapeRect: Rect) {
+    if (isLaidOut.not()) {
+      post { expandFrom(fromShapeRect) }
+      return
+    }
+
+    expand(ExpandedItemLocation(viewIndex = -1, locationOnScreen = fromShapeRect))
   }
 
   /**
    * @param toShapeRect Final dimensions of this page, when it fully collapses.
    */
-  internal fun collapseTo(toShapeRect: Rect) {
-    collapse(InboxRecyclerView.ExpandedItem(-1, -1, toShapeRect))
+  fun collapseTo(toShapeRect: Rect) {
+    collapse(ExpandedItemLocation(viewIndex = -1, locationOnScreen = toShapeRect))
   }
 }
